@@ -57,8 +57,10 @@ function CallInterviewer() {
   const [callDuration, setCallDuration] = useState(0)
   const [loading, setLoading] = useState(false)
 
-  // Live Eye Contact Percentage Tracking State (0 - 100%)
-  const [eyeContactPercentage, setEyeContactPercentage] = useState(96)
+  // Live Camera & Eye Contact Tracking States (0 - 100%)
+  const [isCameraActive, setIsCameraActive] = useState(false)
+  const [isFaceDetected, setIsFaceDetected] = useState(false)
+  const [eyeContactPercentage, setEyeContactPercentage] = useState(0)
   const webcamRef = useRef(null)
 
   const router = useRouter()
@@ -87,10 +89,16 @@ function CallInterviewer() {
 
   // Dynamically load MediaPipe FaceMesh for live Eye Contact Percentage tracking during voice calls
   useEffect(() => {
-    if (!isCallActive) return
+    if (!isCallActive) {
+      setIsCameraActive(false)
+      setIsFaceDetected(false)
+      setEyeContactPercentage(0)
+      return
+    }
 
-    let cameraInstance = null
-    let active = true
+    let faceMesh = null
+    let animId = null
+    let isCancelled = false
 
     const loadScript = (src) => {
       return new Promise((resolve, reject) => {
@@ -112,9 +120,9 @@ function CallInterviewer() {
       loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js'),
     ])
       .then(() => {
-        if (!active) return
-        if (window.FaceMesh && window.Camera) {
-          const faceMesh = new window.FaceMesh({
+        if (isCancelled) return
+        if (window.FaceMesh) {
+          faceMesh = new window.FaceMesh({
             locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`,
           })
 
@@ -125,58 +133,108 @@ function CallInterviewer() {
             minTrackingConfidence: 0.5,
           })
 
+          faceMesh.initialize().catch((e) => console.error("MediaPipe initialize error:", e))
+
           faceMesh.onResults((results) => {
+            if (isCancelled) return
+
             if (!results.multiFaceLandmarks || results.multiFaceLandmarks.length === 0) {
-              setEyeContactPercentage((prev) => Math.max(0, Math.round(prev * 0.7)))
+              setIsFaceDetected(false)
+              setEyeContactPercentage(0)
               return
             }
 
+            setIsFaceDetected(true)
             const landmarks = results.multiFaceLandmarks[0]
             const leftCorner = landmarks[33]
             const rightCorner = landmarks[133]
-            const iris = landmarks[468]
+            const irisLeft = landmarks[468]
 
-            if (leftCorner && rightCorner && iris) {
-              const eyeWidth = Math.abs(rightCorner.x - leftCorner.x)
-              const irisPos = Math.abs(iris.x - leftCorner.x)
-              const ratioX = irisPos / (eyeWidth || 1)
+            const innerCornerRight = landmarks[362]
+            const outerCornerRight = landmarks[263]
+            const irisRight = landmarks[473]
 
-              // Deviation from center ratio (0.50) looking directly into camera
-              const deviation = Math.abs(ratioX - 0.50)
+            const topLid = landmarks[159]
+            const bottomLid = landmarks[145]
+
+            const nose = landmarks[1]
+            const leftCheek = landmarks[234]
+            const rightCheek = landmarks[454]
+
+            if (leftCorner && rightCorner && innerCornerRight && outerCornerRight && nose) {
+              const leftIrisX = irisLeft ? irisLeft.x : (leftCorner.x + rightCorner.x) / 2
+              const rightIrisX = irisRight ? irisRight.x : (innerCornerRight.x + outerCornerRight.x) / 2
+
+              const eyeWidthLeft = Math.abs(rightCorner.x - leftCorner.x)
+              const irisPosLeft = Math.abs(leftIrisX - leftCorner.x)
+              const ratioLeftX = irisPosLeft / (eyeWidthLeft || 0.001)
+
+              const eyeWidthRight = Math.abs(outerCornerRight.x - innerCornerRight.x)
+              const irisPosRight = Math.abs(rightIrisX - innerCornerRight.x)
+              const ratioRightX = irisPosRight / (eyeWidthRight || 0.001)
+
+              const ratioX = (ratioLeftX + ratioRightX) / 2
+              const devX = Math.abs(ratioX - 0.50)
+
+              const eyeHeight = topLid && bottomLid ? Math.abs(bottomLid.y - topLid.y) : 0
+              const irisPosVert = topLid ? Math.abs((irisLeft?.y || topLid.y) - topLid.y) : 0
+              const ratioY = eyeHeight > 0.003 ? irisPosVert / eyeHeight : 0.50
+              const devY = Math.abs(ratioY - 0.50)
+
+              const headWidth = leftCheek && rightCheek ? Math.abs(rightCheek.x - leftCheek.x) : 0
+              const nosePos = leftCheek ? Math.abs(nose.x - leftCheek.x) : 0
+              const headRatioX = headWidth > 0.01 ? nosePos / headWidth : 0.50
+              const headDevX = Math.abs(headRatioX - 0.50)
+
+              const totalDev = (devX * 2.0) + (devY * 1.3) + (headDevX * 1.0)
 
               let rawScore = 100
-              if (deviation > 0.05) {
-                rawScore = Math.max(15, Math.min(100, Math.round(100 - (deviation - 0.05) * 350)))
+              if (totalDev > 0.04) {
+                rawScore = Math.max(0, Math.min(100, Math.round(100 - (totalDev - 0.04) * 300)))
               }
 
               setEyeContactPercentage((prev) => {
-                const smoothed = Math.round(prev * 0.65 + rawScore * 0.35)
+                const smoothed = Math.round(prev * 0.3 + rawScore * 0.7)
                 return Math.min(100, Math.max(0, smoothed))
               })
             }
           })
 
-          if (webcamRef.current && webcamRef.current.video) {
-            cameraInstance = new window.Camera(webcamRef.current.video, {
-              onFrame: async () => {
-                if (webcamRef.current?.video) {
-                  await faceMesh.send({ image: webcamRef.current.video })
+          let processing = false
+          const processFrame = async () => {
+            if (isCancelled) return
+
+            const video = webcamRef.current?.video
+            const isVideoActive = video && video.videoWidth > 0 && video.videoHeight > 0 && !video.paused && !video.ended
+
+            if (isVideoActive) {
+              setIsCameraActive(true)
+              if (!processing && faceMesh) {
+                processing = true
+                try {
+                  await faceMesh.send({ image: video })
+                } catch (err) {
+                  console.error("FaceMesh send error:", err)
                 }
-              },
-              width: 320,
-              height: 240,
-            })
-            cameraInstance.start()
+                processing = false
+              }
+            } else {
+              setIsCameraActive(false)
+              setIsFaceDetected(false)
+              setEyeContactPercentage(0)
+            }
+
+            animId = requestAnimationFrame(processFrame)
           }
+
+          processFrame()
         }
       })
       .catch((err) => console.error('Error loading MediaPipe in CallInterviewer:', err))
 
     return () => {
-      active = false
-      if (cameraInstance) {
-        cameraInstance.stop()
-      }
+      isCancelled = true
+      if (animId) cancelAnimationFrame(animId)
     }
   }, [isCallActive])
 
@@ -365,7 +423,7 @@ function CallInterviewer() {
     accumulatedTextRef.current = ''
     isSendingRef.current = false
     setIsMuted(false)
-    setEyeContactPercentage(96)
+    setEyeContactPercentage(0)
 
     try {
       // Prompt Gemini to start the call as interviewer Alex
@@ -679,14 +737,30 @@ Return ONLY a valid JSON object matching this exact schema:
             <div className="flex items-center gap-4 text-xs">
               {/* Eye Contact Live Percentage Badge in Call Header */}
               <div className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold transition-all ${
-                eyeContactPercentage >= 75
+                !isCameraActive || !isFaceDetected
+                  ? 'bg-slate-800 text-slate-400 border border-slate-700'
+                  : eyeContactPercentage >= 75
                   ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
                   : eyeContactPercentage >= 45
                   ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40'
                   : 'bg-red-500/20 text-red-400 border border-red-500/40'
               }`}>
-                {eyeContactPercentage >= 45 ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-                <span>{eyeContactPercentage}% Eye Contact</span>
+                {!isCameraActive ? (
+                  <EyeOff className="w-3.5 h-3.5 text-slate-400" />
+                ) : !isFaceDetected ? (
+                  <EyeOff className="w-3.5 h-3.5 text-red-400" />
+                ) : eyeContactPercentage >= 45 ? (
+                  <Eye className="w-3.5 h-3.5" />
+                ) : (
+                  <EyeOff className="w-3.5 h-3.5" />
+                )}
+                <span>
+                  {!isCameraActive
+                    ? 'Camera Off'
+                    : !isFaceDetected
+                    ? 'No Face Detected'
+                    : `${eyeContactPercentage}% Eye Contact`}
+                </span>
               </div>
 
               <div className="flex items-center gap-1.5 bg-slate-800 px-3 py-1.5 rounded-full text-slate-300 font-mono">
@@ -698,7 +772,18 @@ Return ONLY a valid JSON object matching this exact schema:
 
           {/* Hidden Webcam Element for MediaPipe FaceMesh Tracking */}
           <div className="hidden">
-            <Webcam ref={webcamRef} mirrored={true} width={320} height={240} />
+            <Webcam
+              ref={webcamRef}
+              mirrored={true}
+              width={320}
+              height={240}
+              onUserMedia={() => setIsCameraActive(true)}
+              onUserMediaError={() => {
+                setIsCameraActive(false)
+                setIsFaceDetected(false)
+                setEyeContactPercentage(0)
+              }}
+            />
           </div>
 
           {/* Central Call Visualizer Section */}
