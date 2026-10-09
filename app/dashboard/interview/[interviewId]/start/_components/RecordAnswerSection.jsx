@@ -20,9 +20,11 @@ function RecordAnswerSection({ mockInterviewQuestion, activeQuestionIndex, inter
   const [isRecording, setIsRecording] = useState(false)
   const wasRecordingRef = useRef(false)
 
-  // Dynamic Eye Contact Percentage State (0 - 100%)
-  const [eyeContactPercentage, setEyeContactPercentage] = useState(98)
-  const [isLookingAtCamera, setIsLookingAtCamera] = useState(true)
+  // Dynamic Camera & Eye Contact Tracking States
+  const [isCameraActive, setIsCameraActive] = useState(false)
+  const [isFaceDetected, setIsFaceDetected] = useState(false)
+  const [eyeContactPercentage, setEyeContactPercentage] = useState(0)
+  const [isLookingAtCamera, setIsLookingAtCamera] = useState(false)
   const webcamRef = useRef(null)
   const recognitionRef = useRef(null)
   const lookAwayTimerRef = useRef(null)
@@ -79,10 +81,11 @@ function RecordAnswerSection({ mockInterviewQuestion, activeQuestionIndex, inter
     }
   }
 
-  // Dynamically load MediaPipe FaceMesh scripts for Eye Contact Percentage tracking
+  // Dynamically load MediaPipe FaceMesh scripts for real-time Eye Contact tracking
   useEffect(() => {
-    let cameraInstance = null
-    let active = true
+    let faceMesh = null
+    let animId = null
+    let isCancelled = false
 
     const loadScript = (src) => {
       return new Promise((resolve, reject) => {
@@ -104,9 +107,9 @@ function RecordAnswerSection({ mockInterviewQuestion, activeQuestionIndex, inter
       loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js'),
     ])
       .then(() => {
-        if (!active) return
-        if (window.FaceMesh && window.Camera) {
-          const faceMesh = new window.FaceMesh({
+        if (isCancelled) return
+        if (window.FaceMesh) {
+          faceMesh = new window.FaceMesh({
             locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`,
           })
 
@@ -117,41 +120,81 @@ function RecordAnswerSection({ mockInterviewQuestion, activeQuestionIndex, inter
             minTrackingConfidence: 0.5,
           })
 
+          faceMesh.initialize().catch((e) => console.error("MediaPipe initialize error:", e))
+
           faceMesh.onResults((results) => {
+            if (isCancelled) return
+
             if (!results.multiFaceLandmarks || results.multiFaceLandmarks.length === 0) {
-              setEyeContactPercentage((prev) => Math.max(0, Math.round(prev * 0.7)))
+              setIsFaceDetected(false)
+              setEyeContactPercentage(0)
               setIsLookingAtCamera(false)
               handleLookAway()
               return
             }
 
+            setIsFaceDetected(true)
             const landmarks = results.multiFaceLandmarks[0]
+
             const leftCorner = landmarks[33]
             const rightCorner = landmarks[133]
-            const iris = landmarks[468]
+            const irisLeft = landmarks[468]
 
-            if (leftCorner && rightCorner && iris) {
-              const eyeWidth = Math.abs(rightCorner.x - leftCorner.x)
-              const irisPos = Math.abs(iris.x - leftCorner.x)
-              const ratioX = irisPos / (eyeWidth || 1)
+            const innerCornerRight = landmarks[362]
+            const outerCornerRight = landmarks[263]
+            const irisRight = landmarks[473]
 
-              // Ideal center ratio looking directly into camera lens is ~0.50
-              const deviation = Math.abs(ratioX - 0.50)
+            const topLid = landmarks[159]
+            const bottomLid = landmarks[145]
 
-              // Calculate dynamic percentage: high percentage when aligned, dropping when eyes move away
+            const nose = landmarks[1]
+            const leftCheek = landmarks[234]
+            const rightCheek = landmarks[454]
+
+            if (leftCorner && rightCorner && innerCornerRight && outerCornerRight && nose) {
+              const leftIrisX = irisLeft ? irisLeft.x : (leftCorner.x + rightCorner.x) / 2
+              const rightIrisX = irisRight ? irisRight.x : (innerCornerRight.x + outerCornerRight.x) / 2
+
+              // Left Eye Ratio
+              const eyeWidthLeft = Math.abs(rightCorner.x - leftCorner.x)
+              const irisPosLeft = Math.abs(leftIrisX - leftCorner.x)
+              const ratioLeftX = irisPosLeft / (eyeWidthLeft || 0.001)
+
+              // Right Eye Ratio
+              const eyeWidthRight = Math.abs(outerCornerRight.x - innerCornerRight.x)
+              const irisPosRight = Math.abs(rightIrisX - innerCornerRight.x)
+              const ratioRightX = irisPosRight / (eyeWidthRight || 0.001)
+
+              const ratioX = (ratioLeftX + ratioRightX) / 2
+              const devX = Math.abs(ratioX - 0.50)
+
+              // Vertical Ratio
+              const eyeHeight = topLid && bottomLid ? Math.abs(bottomLid.y - topLid.y) : 0
+              const irisPosVert = topLid ? Math.abs((irisLeft?.y || topLid.y) - topLid.y) : 0
+              const ratioY = eyeHeight > 0.003 ? irisPosVert / eyeHeight : 0.50
+              const devY = Math.abs(ratioY - 0.50)
+
+              // Head Yaw
+              const headWidth = leftCheek && rightCheek ? Math.abs(rightCheek.x - leftCheek.x) : 0
+              const nosePos = leftCheek ? Math.abs(nose.x - leftCheek.x) : 0
+              const headRatioX = headWidth > 0.01 ? nosePos / headWidth : 0.50
+              const headDevX = Math.abs(headRatioX - 0.50)
+
+              const totalDev = (devX * 2.0) + (devY * 1.3) + (headDevX * 1.0)
+
               let rawScore = 100
-              if (deviation > 0.05) {
-                rawScore = Math.max(15, Math.min(100, Math.round(100 - (deviation - 0.05) * 350)))
+              if (totalDev > 0.04) {
+                rawScore = Math.max(0, Math.min(100, Math.round(100 - (totalDev - 0.04) * 300)))
               }
 
               setEyeContactPercentage((prev) => {
-                const smoothed = Math.round(prev * 0.65 + rawScore * 0.35)
+                const smoothed = Math.round(prev * 0.3 + rawScore * 0.7)
                 const finalScore = Math.min(100, Math.max(0, smoothed))
-                setIsLookingAtCamera(finalScore >= 60)
+                setIsLookingAtCamera(finalScore >= 50)
                 return finalScore
               })
 
-              if (deviation <= 0.15) {
+              if (totalDev <= 0.16) {
                 handleFocused()
               } else {
                 handleLookAway()
@@ -159,30 +202,43 @@ function RecordAnswerSection({ mockInterviewQuestion, activeQuestionIndex, inter
             }
           })
 
-          if (webcamRef.current && webcamRef.current.video) {
-            cameraInstance = new window.Camera(webcamRef.current.video, {
-              onFrame: async () => {
-                if (webcamRef.current?.video) {
-                  await faceMesh.send({ image: webcamRef.current.video })
+          let processing = false
+          const processFrame = async () => {
+            if (isCancelled) return
+
+            const video = webcamRef.current?.video
+            const isVideoActive = video && video.videoWidth > 0 && video.videoHeight > 0 && !video.paused && !video.ended
+
+            if (isVideoActive) {
+              setIsCameraActive(true)
+              if (!processing && faceMesh) {
+                processing = true
+                try {
+                  await faceMesh.send({ image: video })
+                } catch (err) {
+                  console.error("FaceMesh send error:", err)
                 }
-              },
-              width: 640,
-              height: 480,
-            })
-            cameraInstance.start()
+                processing = false
+              }
+            } else {
+              setIsCameraActive(false)
+              setIsFaceDetected(false)
+              setEyeContactPercentage(0)
+              setIsLookingAtCamera(false)
+            }
+
+            animId = requestAnimationFrame(processFrame)
           }
+
+          processFrame()
         }
       })
       .catch((err) => console.error('Error loading MediaPipe scripts:', err))
 
     return () => {
-      active = false
-      if (cameraInstance) {
-        cameraInstance.stop()
-      }
-      if (lookAwayTimerRef.current) {
-        clearTimeout(lookAwayTimerRef.current)
-      }
+      isCancelled = true
+      if (animId) cancelAnimationFrame(animId)
+      if (lookAwayTimerRef.current) clearTimeout(lookAwayTimerRef.current)
     }
   }, [])
 
@@ -368,7 +424,19 @@ function RecordAnswerSection({ mockInterviewQuestion, activeQuestionIndex, inter
         
         {/* Real-time Dynamic Eye Contact Percentage Badge */}
         <div className='absolute top-6 left-6 z-20'>
-          {eyeContactPercentage >= 75 ? (
+          {!isCameraActive ? (
+            <div className='flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-slate-700/90 text-slate-200 text-xs font-bold backdrop-blur-md shadow-md transition-all'>
+              <span className='w-2 h-2 rounded-full bg-slate-400' />
+              <EyeOff size={15} />
+              <span>Camera Inactive</span>
+            </div>
+          ) : !isFaceDetected ? (
+            <div className='flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-red-600/90 text-white text-xs font-bold backdrop-blur-md shadow-md animate-in fade-in transition-all'>
+              <span className='w-2 h-2 rounded-full bg-white animate-ping' />
+              <EyeOff size={15} />
+              <span>0% Eye Contact (No Face Detected)</span>
+            </div>
+          ) : eyeContactPercentage >= 75 ? (
             <div className='flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-emerald-500/90 text-white text-xs font-bold backdrop-blur-md shadow-md animate-in fade-in transition-all'>
               <span className='w-2 h-2 rounded-full bg-white animate-pulse' />
               <Eye size={15} />
@@ -389,10 +457,12 @@ function RecordAnswerSection({ mockInterviewQuestion, activeQuestionIndex, inter
           )}
         </div>
 
-        {/* Dynamic Webcam Glow Border based on Eye Contact Percentage */}
+        {/* Dynamic Webcam Glow Border based on Eye Contact Percentage & Camera State */}
         <div
           className={`absolute inset-0 pointer-events-none z-10 border-4 transition-all duration-300 rounded-2xl ${
-            eyeContactPercentage >= 75
+            !isCameraActive || !isFaceDetected
+              ? 'border-slate-700/50'
+              : eyeContactPercentage >= 75
               ? 'border-emerald-500/50 shadow-[inset_0_0_15px_rgba(16,185,129,0.3)]'
               : eyeContactPercentage >= 45
               ? 'border-amber-500/70 shadow-[inset_0_0_15px_rgba(245,158,11,0.4)]'
@@ -411,6 +481,12 @@ function RecordAnswerSection({ mockInterviewQuestion, activeQuestionIndex, inter
         <Webcam
           ref={webcamRef}
           mirrored={true}
+          onUserMedia={() => setIsCameraActive(true)}
+          onUserMediaError={() => {
+            setIsCameraActive(false)
+            setIsFaceDetected(false)
+            setEyeContactPercentage(0)
+          }}
           style={{
             height: 320,
             width: '100%',
