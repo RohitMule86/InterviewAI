@@ -65,7 +65,7 @@ export default function Page() {
           </div>
         </div>
 
-        {/* Bottom Footer Note */}
+        {/* Bottom Footer */}
         <div className="relative z-10 pt-6 border-t border-white/10 flex items-center justify-between text-xs text-slate-400">
           <span>© {new Date().getFullYear()} Placify. All rights reserved.</span>
           <Link href="/" className="hover:text-white transition-colors flex items-center gap-1">
