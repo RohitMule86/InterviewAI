@@ -14,7 +14,7 @@ function StartInterview({ params }) {
     const { interviewId } = use(params);
 
     const [interviewData, setInterviewData] = useState();
-    const [mockInterviewQuestion, setMockInterviewQuestion] = useState();
+    const [mockInterviewQuestion, setMockInterviewQuestion] = useState([]);
     const [activeQuestionIndex, setActiveQuestionIndex] = useState(0);
 
     useEffect(() => {
@@ -22,25 +22,52 @@ function StartInterview({ params }) {
     }, [interviewId]);
 
     /*
-    Used to get interview details by mock id
+    Used to get interview details by mock id and normalize questions array
     */
     const GetInterviewDetails = async () => {
-        const result = await db
-            .select()
-            .from(MockInterview)
-            .where(eq(MockInterview.mockId, interviewId));
+        try {
+            const result = await db
+                .select()
+                .from(MockInterview)
+                .where(eq(MockInterview.mockId, interviewId));
 
-        if (result.length === 0) {
-            console.log("Interview not found");
-            return;
+            if (result.length === 0) {
+                console.log("Interview not found");
+                return;
+            }
+
+            const rawJson = result[0].jsonMockResp;
+            const parsedJson = JSON.parse(rawJson);
+
+            let questionsArray = [];
+
+            if (Array.isArray(parsedJson)) {
+                questionsArray = parsedJson;
+            } else if (parsedJson && typeof parsedJson === 'object') {
+                if (Array.isArray(parsedJson.questions)) {
+                    questionsArray = parsedJson.questions;
+                } else if (Array.isArray(parsedJson.interviewQuestions)) {
+                    questionsArray = parsedJson.interviewQuestions;
+                } else if (Array.isArray(parsedJson.interview_questions)) {
+                    questionsArray = parsedJson.interview_questions;
+                } else if (Array.isArray(parsedJson.qaBreakdown)) {
+                    questionsArray = parsedJson.qaBreakdown;
+                } else if (Array.isArray(parsedJson.mockQuestions)) {
+                    questionsArray = parsedJson.mockQuestions;
+                } else {
+                    const foundArray = Object.values(parsedJson).find(v => Array.isArray(v));
+                    if (foundArray) {
+                        questionsArray = foundArray;
+                    }
+                }
+            }
+
+            setMockInterviewQuestion(questionsArray);
+            setInterviewData(result[0]);
+        } catch (error) {
+            console.error("Error parsing interview questions:", error);
+            setMockInterviewQuestion([]);
         }
-
-        const jsonMockResp = JSON.parse(result[0].jsonMockResp);
-
-        console.log(jsonMockResp);
-
-        setMockInterviewQuestion(jsonMockResp);
-        setInterviewData(result[0]);
     }
 
     return (
@@ -63,15 +90,16 @@ function StartInterview({ params }) {
                 />
 
             </div>
-            <div className='flex justify-end gap-6'>
-                {activeQuestionIndex>0 &&
-                <Button onClick={()=>setActiveQuestionIndex(activeQuestionIndex-1)}>Previous Question</Button>}
-                {activeQuestionIndex!=mockInterviewQuestion?.length-1 &&
-                <Button onClick={()=>setActiveQuestionIndex(activeQuestionIndex+1)}>Next Question</Button>}
-                {activeQuestionIndex==mockInterviewQuestion?.length-1 &&
+            <div className='flex justify-end gap-6 my-6'>
+                {activeQuestionIndex > 0 &&
+                <Button onClick={() => setActiveQuestionIndex(activeQuestionIndex - 1)}>Previous Question</Button>}
                 
-                <Link href={'/dashboard/interview/'+interviewData?.mockId+"/feedback"}>
-                <Button>End Interview</Button>
+                {mockInterviewQuestion && activeQuestionIndex < mockInterviewQuestion.length - 1 &&
+                <Button onClick={() => setActiveQuestionIndex(activeQuestionIndex + 1)}>Next Question</Button>}
+                
+                {mockInterviewQuestion && activeQuestionIndex >= mockInterviewQuestion.length - 1 &&
+                <Link href={'/dashboard/interview/' + interviewData?.mockId + "/feedback"}>
+                    <Button className="bg-emerald-600 hover:bg-emerald-700 text-white">End Interview</Button>
                 </Link>}
             </div>
         </div>
