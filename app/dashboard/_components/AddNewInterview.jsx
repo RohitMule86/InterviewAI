@@ -36,7 +36,19 @@ function AddNewInterview() {
     e.preventDefault()
     console.log(jobPosition, jobDesc, jobExperience)
 
-    const InputPrompt=" Job Position: "+jobPosition+", Job Description: "+jobDesc+", Years of Experience: "+jobExperience+",Depends on this information please give me "+process.env.NEXT_PUBLIC_INTERVIEW_QUESTION_COUNT+" Interview question with Answered in Json Format,Give Question and Answered as field in JSON"
+    const count = process.env.NEXT_PUBLIC_INTERVIEW_QUESTION_COUNT || 5
+    const InputPrompt = `Job Position: ${jobPosition}, Job Description / Tech Stack: ${jobDesc}, Years of Experience: ${jobExperience}.
+Based on this information, please generate EXACTLY ${count} distinct technical interview questions along with detailed ideal answers.
+
+Return ONLY a raw JSON array of ${count} objects (no markdown formatting, no code block markers).
+Format:
+[
+  { "question": "Question 1 text...", "answer": "Detailed answer 1..." },
+  { "question": "Question 2 text...", "answer": "Detailed answer 2..." },
+  { "question": "Question 3 text...", "answer": "Detailed answer 3..." },
+  { "question": "Question 4 text...", "answer": "Detailed answer 4..." },
+  { "question": "Question 5 text...", "answer": "Detailed answer 5..." }
+]`
 
     const result=await chatSession.sendMessage(InputPrompt);
     const MockJsonResp=(result.response.text()).replace('```json','').replace('```','')
